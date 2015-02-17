@@ -200,13 +200,8 @@
 					"-DSQLITE_TEMP_STORE=2",
 					"-DSQLITE_THREADSAFE",
 					"-DSQLCIPHER_CRYPTO_CC",
-				);
-				"OTHER_CFLAGS[arch=armv6]" = (
-					"-mno-thumb",
-					"-DSQLITE_HAS_CODEC",
-					"-DSQLITE_TEMP_STORE=2",
-					"-DSQLITE_THREADSAFE",
-					"-DSQLCIPHER_CRYPTO_CC",
+					"-DSQLITE_ENABLE_RTREE=1",
+					"-DSQLITE_ENABLE_FTS3",
 				);
 				OTHER_LDFLAGS = "";
 				PRODUCT_NAME = sqlcipher;
@@ -229,15 +224,8 @@
 					"-DSQLITE_TEMP_STORE=2",
 					"-DSQLITE_THREADSAFE",
 					"-DSQLCIPHER_CRYPTO_CC",
-				);
-				"OTHER_CFLAGS[arch=armv6]" = (
-					"-mno-thumb",
-					"-DSQLITE_HAS_CODEC",
-					"-DNDEBUG",
-					"-DSQLITE_OS_UNIX=1",
-					"-DSQLITE_TEMP_STORE=2",
-					"-DSQLITE_THREADSAFE",
-					"-DSQLCIPHER_CRYPTO_CC",
+					"-DSQLITE_ENABLE_FTS3",
+					"-DSQLITE_ENABLE_RTREE=1",
 				);
 				OTHER_LDFLAGS = "";
 				PRODUCT_NAME = sqlcipher;
@@ -265,7 +253,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 4.3;
 				"IPHONEOS_DEPLOYMENT_TARGET[arch=arm64]" = 7.0;
-				ONLY_ACTIVE_ARCH = YES;
+				ONLY_ACTIVE_ARCH = NO;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphonesimulator macosx iphoneos";
