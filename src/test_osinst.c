@@ -644,9 +644,9 @@ static void vfslog_flush(VfslogVfs *p){
 
 static void put32bits(unsigned char *p, unsigned int v){
   p[0] = v>>24;
-  p[1] = v>>16;
-  p[2] = v>>8;
-  p[3] = v;
+  p[1] = (unsigned char)(v>>16);
+  p[2] = (unsigned char)(v>>8);
+  p[3] = (unsigned char)v;
 }
 
 static void vfslog_call(
@@ -1104,9 +1104,16 @@ int sqlite3_vfslog_register(sqlite3 *db){
 
 #if defined(SQLITE_TEST) || defined(TCLSH)
 
-#include <tcl.h>
+#if defined(INCLUDE_SQLITE_TCL_H)
+#  include "sqlite_tcl.h"
+#else
+#  include "tcl.h"
+#  ifndef SQLITE_TCLAPI
+#    define SQLITE_TCLAPI
+#  endif
+#endif
 
-static int test_vfslog(
+static int SQLITE_TCLAPI test_vfslog(
   void *clientData,
   Tcl_Interp *interp,
   int objc,
@@ -1131,7 +1138,6 @@ static int test_vfslog(
 
   switch( (enum VL_enum)iSub ){
     case VL_ANNOTATE: {
-      int rc;
       char *zVfs;
       char *zMsg;
       if( objc!=4 ){
@@ -1148,7 +1154,6 @@ static int test_vfslog(
       break;
     }
     case VL_FINALIZE: {
-      int rc;
       char *zVfs;
       if( objc!=3 ){
         Tcl_WrongNumArgs(interp, 2, objv, "VFS");
@@ -1164,7 +1169,6 @@ static int test_vfslog(
     };
 
     case VL_NEW: {
-      int rc;
       char *zVfs;
       char *zParent;
       char *zLog;

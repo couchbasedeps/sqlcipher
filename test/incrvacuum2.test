@@ -134,7 +134,7 @@ do_test incrvacuum2-3.2 {
 
 integrity_check incrvacuum2-3.3
 
-ifcapable wal {
+if {[wal_is_capable]} {
   # At one point, when a specific page was being extracted from the b-tree
   # free-list (e.g. during an incremental-vacuum), all trunk pages that
   # occurred before the specific page in the free-list trunk were being
@@ -188,8 +188,10 @@ ifcapable wal {
     execsql { 
       PRAGMA journal_mode = WAL;
       PRAGMA incremental_vacuum(1);
-      PRAGMA wal_checkpoint;
     }
+  } {wal}
+  do_test 4.2.1 {
+    execsql { PRAGMA wal_checkpoint }
     file size test.db-wal
   } [expr {32+2*(512+24)}]
 

@@ -12,9 +12,11 @@ static const char zHelp[] =
   "  --explain           Like --sqlonly but with added EXPLAIN keywords\n"
   "  --heap SZ MIN       Memory allocator uses SZ bytes & min allocation MIN\n"
   "  --incrvacuum        Enable incremenatal vacuum mode\n"
-  "  --journalmode M     Set the journal_mode to MODE\n"
+  "  --journal M         Set the journal_mode to M\n"
   "  --key KEY           Set the encryption key to KEY\n"
   "  --lookaside N SZ    Configure lookaside for N slots of SZ bytes each\n"
+  "  --multithread       Set multithreaded mode\n"
+  "  --nomemstat         Disable memory statistics\n"
   "  --nosync            Set PRAGMA synchronous=OFF\n"
   "  --notnull           Add NOT NULL constraints to table columns\n"
   "  --pagesize N        Set the page size to N\n"
@@ -22,11 +24,16 @@ static const char zHelp[] =
   "  --primarykey        Use PRIMARY KEY instead of UNIQUE where appropriate\n"
   "  --reprepare         Reprepare each statement upon every invocation\n"
   "  --scratch N SZ      Configure scratch memory for N slots of SZ bytes each\n"
+  "  --serialized        Set serialized threading mode\n"
+  "  --singlethread      Set single-threaded mode - disables all mutexing\n"
   "  --sqlonly           No-op.  Only show the SQL that would have been run.\n"
+  "  --shrink-memory     Invoke sqlite3_db_release_memory() frequently.\n"
   "  --size N            Relative test size.  Default=100\n"
   "  --stats             Show statistics at the end\n"
+  "  --temp N            N from 0 to 9.  0: no temp table. 9: all temp tables\n"
   "  --testset T         Run test-set T\n"
   "  --trace             Turn on SQL tracing\n"
+  "  --threads N         Use up to N threads for sorting\n"
   "  --utf16be           Set text encoding to UTF-16BE\n"
   "  --utf16le           Set text encoding to UTF-16LE\n"
   "  --verify            Run additional verification steps.\n"
@@ -41,6 +48,15 @@ static const char zHelp[] =
 #include <stdarg.h>
 #include <string.h>
 #include <ctype.h>
+#define ISSPACE(X) isspace((unsigned char)(X))
+#define ISDIGIT(X) isdigit((unsigned char)(X))
+
+#if SQLITE_VERSION_NUMBER<3005000
+# define sqlite3_int64 sqlite_int64
+#endif
+#ifdef SQLITE_ENABLE_RBU
+# include "sqlite3rbu.h"
+#endif
 
 /* All global state is held in this structure */
 static struct Global {
@@ -53,6 +69,8 @@ static struct Global {
   int bSqlOnly;              /* True to print the SQL once only */
   int bExplain;              /* Print SQL with EXPLAIN prefix */
   int bVerify;               /* Try to verify that results are correct */
+  int bMemShrink;            /* Call sqlite3_db_release_memory() often */
+  int eTemp;                 /* 0: no TEMP.  9: always TEMP. */
   int szTest;                /* Scale factor for test iterations */
   const char *zWR;           /* Might be WITHOUT ROWID */
   const char *zNN;           /* Might be NOT NULL */
@@ -61,6 +79,12 @@ static struct Global {
   int nResult;               /* Size of the current result */
   char zResult[3000];        /* Text of the current result */
 } g;
+
+/* Return " TEMP" or "", as appropriate for creating a table.
+*/
+static const char *isTemp(int N){
+  return g.eTemp>=N ? " TEMP" : "";
+}
 
 
 /* Print an error message and exit */
@@ -138,6 +162,9 @@ static int integerValue(const char *zArg){
 
 /* Return the current wall-clock time, in milliseconds */
 sqlite3_int64 speedtest1_timestamp(void){
+#if SQLITE_VERSION_NUMBER<3005000
+  return 0;
+#else
   static sqlite3_vfs *clockVfs = 0;
   sqlite3_int64 t;
   if( clockVfs==0 ) clockVfs = sqlite3_vfs_find(0);
@@ -152,6 +179,7 @@ sqlite3_int64 speedtest1_timestamp(void){
     t = (sqlite3_int64)(r*86400000.0);
   }
   return t;
+#endif
 }
 
 /* Return a pseudo-random unsigned integer */
@@ -297,11 +325,11 @@ void speedtest1_final(void){
 /* Print an SQL statement to standard output */
 static void printSql(const char *zSql){
   int n = (int)strlen(zSql);
-  while( n>0 && (zSql[n-1]==';' || isspace(zSql[n-1])) ){ n--; }
+  while( n>0 && (zSql[n-1]==';' || ISSPACE(zSql[n-1])) ){ n--; }
   if( g.bExplain ) printf("EXPLAIN ");
   printf("%.*s;\n", n, zSql);
   if( g.bExplain
-#if SQLITE_VERSION_NUMBER>=3007010 
+#if SQLITE_VERSION_NUMBER>=3007017 
    && ( sqlite3_strglob("CREATE *", zSql)==0
      || sqlite3_strglob("DROP *", zSql)==0
      || sqlite3_strglob("ALTER *", zSql)==0
@@ -310,6 +338,15 @@ static void printSql(const char *zSql){
   ){
     printf("%.*s;\n", n, zSql);
   }
+}
+
+/* Shrink memory used, if appropriate and if the SQLite version is capable
+** of doing so.
+*/
+void speedtest1_shrink_memory(void){
+#if SQLITE_VERSION_NUMBER>=3007010
+  if( g.bMemShrink ) sqlite3_db_release_memory(g.db);
+#endif
 }
 
 /* Run SQL */
@@ -328,6 +365,7 @@ void speedtest1_exec(const char *zFormat, ...){
     if( rc!=SQLITE_OK ) fatal_error("exec error: %s\n", sqlite3_errmsg(g.db));
   }
   sqlite3_free(zSql);
+  speedtest1_shrink_memory();
 }
 
 /* Prepare an SQL statement */
@@ -369,22 +407,28 @@ void speedtest1_run(void){
       }
     }
   }
+#if SQLITE_VERSION_NUMBER>=3006001
   if( g.bReprepare ){
     sqlite3_stmt *pNew;
     sqlite3_prepare_v2(g.db, sqlite3_sql(g.pStmt), -1, &pNew, 0);
     sqlite3_finalize(g.pStmt);
     g.pStmt = pNew;
-  }else{
+  }else
+#endif
+  {
     sqlite3_reset(g.pStmt);
   }
+  speedtest1_shrink_memory();
 }
 
+#ifndef SQLITE_OMIT_DEPRECATED
 /* The sqlite3_trace() callback function */
 static void traceCallback(void *NotUsed, const char *zSql){
   int n = (int)strlen(zSql);
-  while( n>0 && (zSql[n-1]==';' || isspace(zSql[n-1])) ) n--;
+  while( n>0 && (zSql[n-1]==';' || ISSPACE(zSql[n-1])) ) n--;
   fprintf(stderr,"%.*s;\n", n, zSql);
 }
+#endif /* SQLITE_OMIT_DEPRECATED */
 
 /* Substitute random() function that gives the same random
 ** sequence on each run, for repeatability. */
@@ -425,8 +469,8 @@ void testset_main(void){
   maxb = roundup_allones(sz);
   speedtest1_begin_test(100, "%d INSERTs into table with no index", n);
   speedtest1_exec("BEGIN");
-  speedtest1_exec("CREATE TABLE t1(a INTEGER %s, b INTEGER %s, c TEXT %s);",
-                  g.zNN, g.zNN, g.zNN);
+  speedtest1_exec("CREATE%s TABLE t1(a INTEGER %s, b INTEGER %s, c TEXT %s);",
+                  isTemp(9), g.zNN, g.zNN, g.zNN);
   speedtest1_prepare("INSERT INTO t1 VALUES(?1,?2,?3); --  %d times", n);
   for(i=1; i<=n; i++){
     x1 = swizzle(i,maxb);
@@ -443,8 +487,9 @@ void testset_main(void){
   n = sz;
   speedtest1_begin_test(110, "%d ordered INSERTS with one index/PK", n);
   speedtest1_exec("BEGIN");
-  speedtest1_exec("CREATE TABLE t2(a INTEGER %s %s, b INTEGER %s, c TEXT %s) %s",
-                   g.zNN, g.zPK, g.zNN, g.zNN, g.zWR);
+  speedtest1_exec(
+     "CREATE%s TABLE t2(a INTEGER %s %s, b INTEGER %s, c TEXT %s) %s",
+     isTemp(5), g.zNN, g.zPK, g.zNN, g.zNN, g.zWR);
   speedtest1_prepare("INSERT INTO t2 VALUES(?1,?2,?3); -- %d times", n);
   for(i=1; i<=n; i++){
     x1 = swizzle(i,maxb);
@@ -461,8 +506,9 @@ void testset_main(void){
   n = sz;
   speedtest1_begin_test(120, "%d unordered INSERTS with one index/PK", n);
   speedtest1_exec("BEGIN");
-  speedtest1_exec("CREATE TABLE t3(a INTEGER %s %s, b INTEGER %s, c TEXT %s) %s",
-                   g.zNN, g.zPK, g.zNN, g.zNN, g.zWR);
+  speedtest1_exec(
+      "CREATE%s TABLE t3(a INTEGER %s %s, b INTEGER %s, c TEXT %s) %s",
+      isTemp(3), g.zNN, g.zPK, g.zNN, g.zNN, g.zWR);
   speedtest1_prepare("INSERT INTO t3 VALUES(?1,?2,?3); -- %d times", n);
   for(i=1; i<=n; i++){
     x1 = swizzle(i,maxb);
@@ -533,7 +579,7 @@ void testset_main(void){
   speedtest1_exec("COMMIT");
   speedtest1_end_test();
 
-  n = 10; //g.szTest/5;
+  n = 10; /* g.szTest/5; */
   speedtest1_begin_test(145, "%d SELECTS w/ORDER BY and LIMIT, unindexed", n);
   speedtest1_exec("BEGIN");
   speedtest1_prepare(
@@ -620,12 +666,12 @@ void testset_main(void){
   speedtest1_begin_test(180, "%d INSERTS with three indexes", n);
   speedtest1_exec("BEGIN");
   speedtest1_exec(
-    "CREATE TABLE t4(\n"
+    "CREATE%s TABLE t4(\n"
     "  a INTEGER %s %s,\n"
     "  b INTEGER %s,\n"
     "  c TEXT %s\n"
     ") %s",
-    g.zNN, g.zPK, g.zNN, g.zNN, g.zWR);
+    isTemp(1), g.zNN, g.zPK, g.zNN, g.zNN, g.zWR);
   speedtest1_exec("CREATE INDEX t4b ON t4(b)");
   speedtest1_exec("CREATE INDEX t4c ON t4(c)");
   speedtest1_exec("INSERT INTO t4 SELECT * FROM t1");
@@ -933,6 +979,7 @@ void testset_cte(void){
 
 }
 
+#ifdef SQLITE_ENABLE_RTREE
 /* Generate two numbers between 1 and mx.  The first number is less than
 ** the second.  Usually the numbers are near each other but can sometimes
 ** be far apart.
@@ -953,7 +1000,9 @@ static void twoCoords(
   *pX0 = x0;
   *pX1 = x1;
 }
+#endif
 
+#ifdef SQLITE_ENABLE_RTREE
 /* The following routine is an R-Tree geometry callback.  It returns
 ** true if the object overlaps a slice on the Y coordinate between the
 ** two values given as arguments.  In other words
@@ -973,7 +1022,9 @@ static int xsliceGeometryCallback(
   *pRes = aCoord[3]>=p->aParam[0] && aCoord[2]<=p->aParam[1];
   return SQLITE_OK;
 }
+#endif /* SQLITE_ENABLE_RTREE */
 
+#ifdef SQLITE_ENABLE_RTREE
 /*
 ** A testset for the R-Tree virtual table
 */
@@ -1008,7 +1059,7 @@ void testset_rtree(int p1, int p2){
   speedtest1_end_test();
 
   speedtest1_begin_test(101, "Copy from rtree to a regular table");
-  speedtest1_exec("CREATE TABLE t1(id INTEGER PRIMARY KEY,x0,x1,y0,y1,z0,z1)");
+  speedtest1_exec(" TABLE t1(id INTEGER PRIMARY KEY,x0,x1,y0,y1,z0,z1)");
   speedtest1_exec("INSERT INTO t1 SELECT * FROM rt1");
   speedtest1_end_test();
 
@@ -1109,6 +1160,7 @@ void testset_rtree(int p1, int p2){
   }
   speedtest1_end_test();
 }
+#endif /* SQLITE_ENABLE_RTREE */
 
 /*
 ** A testset used for debugging speedtest1 itself.
@@ -1127,6 +1179,49 @@ void testset_debug1(void){
   }
 }
 
+#ifdef __linux__
+#include <sys/types.h>
+#include <unistd.h>
+
+/*
+** Attempt to display I/O stats on Linux using /proc/PID/io
+*/
+static void displayLinuxIoStats(FILE *out){
+  FILE *in;
+  char z[200];
+  sqlite3_snprintf(sizeof(z), z, "/proc/%d/io", getpid());
+  in = fopen(z, "rb");
+  if( in==0 ) return;
+  while( fgets(z, sizeof(z), in)!=0 ){
+    static const struct {
+      const char *zPattern;
+      const char *zDesc;
+    } aTrans[] = {
+      { "rchar: ",                  "Bytes received by read():" },
+      { "wchar: ",                  "Bytes sent to write():"    },
+      { "syscr: ",                  "Read() system calls:"      },
+      { "syscw: ",                  "Write() system calls:"     },
+      { "read_bytes: ",             "Bytes rcvd from storage:"  },
+      { "write_bytes: ",            "Bytes sent to storage:"    },
+      { "cancelled_write_bytes: ",  "Cancelled write bytes:"    },
+    };
+    int i;
+    for(i=0; i<sizeof(aTrans)/sizeof(aTrans[0]); i++){
+      int n = (int)strlen(aTrans[i].zPattern);
+      if( strncmp(aTrans[i].zPattern, z, n)==0 ){
+        fprintf(out, "-- %-28s %s", aTrans[i].zDesc, &z[n]);
+        break;
+      }
+    }
+  }
+  fclose(in);
+}   
+#endif
+
+#if SQLITE_VERSION_NUMBER<3006018
+#  define sqlite3_sourceid(X) "(before 3.6.18)"
+#endif
+
 int main(int argc, char **argv){
   int doAutovac = 0;            /* True for --autovacuum */
   int cacheSize = 0;            /* Desired cache size.  0 means default */
@@ -1139,8 +1234,10 @@ int main(int argc, char **argv){
   int noSync = 0;               /* True for --nosync */
   int pageSize = 0;             /* Desired page size.  0 means default */
   int nPCache = 0, szPCache = 0;/* --pcache configuration */
+  int doPCache = 0;             /* True if --pcache is seen */
   int nScratch = 0, szScratch=0;/* --scratch configuration */
   int showStats = 0;            /* True for --stats */
+  int nThread = 0;              /* --threads value */
   const char *zTSet = "main";   /* Which --testset torun */
   int doTrace = 0;              /* True for --trace */
   const char *zEncoding = 0;    /* --utf16be or --utf16le */
@@ -1153,6 +1250,10 @@ int main(int argc, char **argv){
   int iCur, iHi;                /* Stats values, current and "highwater" */
   int i;                        /* Loop counter */
   int rc;                       /* API return code */
+
+  /* Display the version of SQLite being tested */
+  printf("-- Speedtest1 for SQLite %s %.50s\n",
+         sqlite3_libversion(), sqlite3_sourceid());
 
   /* Process command-line arguments */
   g.zWR = "";
@@ -1192,10 +1293,19 @@ int main(int argc, char **argv){
         nLook = integerValue(argv[i+1]);
         szLook = integerValue(argv[i+2]);
         i += 2;
+      }else if( strcmp(z,"multithread")==0 ){
+        sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
+      }else if( strcmp(z,"nomemstat")==0 ){
+        sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 0);
       }else if( strcmp(z,"nosync")==0 ){
         noSync = 1;
       }else if( strcmp(z,"notnull")==0 ){
         g.zNN = "NOT NULL";
+#ifdef SQLITE_ENABLE_RBU
+      }else if( strcmp(z,"rbu")==0 ){
+        sqlite3ota_create_vfs("rbu", 0);
+        sqlite3_vfs_register(sqlite3_vfs_find("rbu"), 1);
+#endif
       }else if( strcmp(z,"pagesize")==0 ){
         if( i>=argc-1 ) fatal_error("missing argument on %s\n", argv[i]);
         pageSize = integerValue(argv[++i]);
@@ -1203,6 +1313,7 @@ int main(int argc, char **argv){
         if( i>=argc-2 ) fatal_error("missing arguments on %s\n", argv[i]);
         nPCache = integerValue(argv[i+1]);
         szPCache = integerValue(argv[i+2]);
+        doPCache = 1;
         i += 2;
       }else if( strcmp(z,"primarykey")==0 ){
         g.zPK = "PRIMARY KEY";
@@ -1213,18 +1324,34 @@ int main(int argc, char **argv){
         nScratch = integerValue(argv[i+1]);
         szScratch = integerValue(argv[i+2]);
         i += 2;
+      }else if( strcmp(z,"serialized")==0 ){
+        sqlite3_config(SQLITE_CONFIG_SERIALIZED);
+      }else if( strcmp(z,"singlethread")==0 ){
+        sqlite3_config(SQLITE_CONFIG_SINGLETHREAD);
       }else if( strcmp(z,"sqlonly")==0 ){
         g.bSqlOnly = 1;
+      }else if( strcmp(z,"shrink-memory")==0 ){
+        g.bMemShrink = 1;
       }else if( strcmp(z,"size")==0 ){
         if( i>=argc-1 ) fatal_error("missing argument on %s\n", argv[i]);
         g.szTest = integerValue(argv[++i]);
       }else if( strcmp(z,"stats")==0 ){
         showStats = 1;
+      }else if( strcmp(z,"temp")==0 ){
+        if( i>=argc-1 ) fatal_error("missing argument on %s\n", argv[i]);
+        i++;
+        if( argv[i][0]<'0' || argv[i][0]>'9' || argv[i][1]!=0 ){
+          fatal_error("argument to --temp should be integer between 0 and 9");
+        }
+        g.eTemp = argv[i][0] - '0';
       }else if( strcmp(z,"testset")==0 ){
         if( i>=argc-1 ) fatal_error("missing argument on %s\n", argv[i]);
         zTSet = argv[++i];
       }else if( strcmp(z,"trace")==0 ){
         doTrace = 1;
+      }else if( strcmp(z,"threads")==0 ){
+        if( i>=argc-1 ) fatal_error("missing argument on %s\n", argv[i]);
+        nThread = integerValue(argv[++i]);
       }else if( strcmp(z,"utf16le")==0 ){
         zEncoding = "utf16le";
       }else if( strcmp(z,"utf16be")==0 ){
@@ -1248,21 +1375,20 @@ int main(int argc, char **argv){
                   argv[i], argv[0]);
     }
   }
-#if 0
-  if( zDbName==0 ){
-    fatal_error(zHelp, argv[0]);
-  }
-#endif
+  if( zDbName!=0 ) unlink(zDbName);
+#if SQLITE_VERSION_NUMBER>=3006001
   if( nHeap>0 ){
     pHeap = malloc( nHeap );
     if( pHeap==0 ) fatal_error("cannot allocate %d-byte heap\n", nHeap);
     rc = sqlite3_config(SQLITE_CONFIG_HEAP, pHeap, nHeap, mnHeap);
     if( rc ) fatal_error("heap configuration failed: %d\n", rc);
   }
-  if( nPCache>0 && szPCache>0 ){
-    pPCache = malloc( nPCache*(sqlite3_int64)szPCache );
-    if( pPCache==0 ) fatal_error("cannot allocate %lld-byte pcache\n",
-                                 nPCache*(sqlite3_int64)szPCache);
+  if( doPCache ){
+    if( nPCache>0 && szPCache>0 ){
+      pPCache = malloc( nPCache*(sqlite3_int64)szPCache );
+      if( pPCache==0 ) fatal_error("cannot allocate %lld-byte pcache\n",
+                                   nPCache*(sqlite3_int64)szPCache);
+    }
     rc = sqlite3_config(SQLITE_CONFIG_PAGECACHE, pPCache, szPCache, nPCache);
     if( rc ) fatal_error("pcache configuration failed: %d\n", rc);
   }
@@ -1276,20 +1402,26 @@ int main(int argc, char **argv){
   if( nLook>0 ){
     sqlite3_config(SQLITE_CONFIG_LOOKASIDE, 0, 0);
   }
+#endif
  
   /* Open the database and the input file */
   if( sqlite3_open(zDbName, &g.db) ){
     fatal_error("Cannot open database file: %s\n", zDbName);
   }
+#if SQLITE_VERSION_NUMBER>=3006001
   if( nLook>0 && szLook>0 ){
     pLook = malloc( nLook*szLook );
     rc = sqlite3_db_config(g.db, SQLITE_DBCONFIG_LOOKASIDE, pLook, szLook,nLook);
     if( rc ) fatal_error("lookaside configuration failed: %d\n", rc);
   }
+#endif
 
   /* Set database connection options */
   sqlite3_create_function(g.db, "random", 0, SQLITE_UTF8, 0, randomFunc, 0, 0);
+#ifndef SQLITE_OMIT_DEPRECATED
   if( doTrace ) sqlite3_trace(g.db, traceCallback, 0);
+#endif
+  speedtest1_exec("PRAGMA threads=%d", nThread);
   if( zKey ){
     speedtest1_exec("PRAGMA key('%s')", zKey);
   }
@@ -1323,7 +1455,12 @@ int main(int argc, char **argv){
   }else if( strcmp(zTSet,"cte")==0 ){
     testset_cte();
   }else if( strcmp(zTSet,"rtree")==0 ){
+#ifdef SQLITE_ENABLE_RTREE
     testset_rtree(6, 147);
+#else
+    fatal_error("compile with -DSQLITE_ENABLE_RTREE to enable "
+                "the R-Tree tests\n");
+#endif
   }else{
     fatal_error("unknown testset: \"%s\"\nChoices: main debug1 cte rtree\n",
                  zTSet);
@@ -1361,6 +1498,7 @@ int main(int argc, char **argv){
 
   sqlite3_close(g.db);
 
+#if SQLITE_VERSION_NUMBER>=3006001
   /* Global memory usage statistics printed after the database connection
   ** has closed.  Memory usage should be zero at this point. */
   if( showStats ){
@@ -1381,6 +1519,13 @@ int main(int argc, char **argv){
     sqlite3_status(SQLITE_STATUS_SCRATCH_SIZE, &iCur, &iHi, 0);
     printf("-- Largest Scratch Allocation:  %d bytes\n", iHi);
   }
+#endif
+
+#ifdef __linux__
+  if( showStats ){
+    displayLinuxIoStats(stdout);
+  }
+#endif
 
   /* Release memory */
   free( pLook );

@@ -36,7 +36,7 @@
 #include "sqlcipher.h"
 #include "crypto.h"
 #ifndef OMIT_MEMLOCK
-#if defined(__unix__) || defined(__APPLE__) 
+#if defined(__unix__) || defined(__APPLE__) || defined(_AIX)
 #include <sys/mman.h>
 #elif defined(_WIN32)
 # include <windows.h>
@@ -70,6 +70,7 @@ typedef struct {
 static unsigned int default_flags = DEFAULT_CIPHER_FLAGS;
 static unsigned char hmac_salt_mask = HMAC_SALT_MASK;
 static int default_kdf_iter = PBKDF2_ITER;
+static int default_page_size = 1024;
 static unsigned int sqlcipher_activate_count = 0;
 static sqlite3_mutex* sqlcipher_provider_mutex = NULL;
 static sqlcipher_provider *default_provider = NULL;
@@ -129,6 +130,9 @@ void sqlcipher_activate() {
 #elif defined (SQLCIPHER_CRYPTO_OPENSSL)
     extern int sqlcipher_openssl_setup(sqlcipher_provider *p);
     sqlcipher_openssl_setup(p);
+#elif defined (SQLCIPHER_CRYPTO_MBEDTLS)
+    extern int sqlcipher_mbedtls_setup(sqlcipher_provider *p);
+    sqlcipher_mbedtls_setup(p);
 #else
 #error "NO DEFAULT SQLCIPHER CRYPTO PROVIDER DEFINED"
 #endif
@@ -434,15 +438,15 @@ static int sqlcipher_cipher_ctx_set_keyspec(cipher_ctx *ctx, const unsigned char
   return SQLITE_OK;
 }
 
-static int sqlcipher_codec_get_store_pass(codec_ctx *ctx) {
+int sqlcipher_codec_get_store_pass(codec_ctx *ctx) {
   return ctx->read_ctx->store_pass;
 }
 
-static void sqlcipher_codec_set_store_pass(codec_ctx *ctx, int value) {
+void sqlcipher_codec_set_store_pass(codec_ctx *ctx, int value) {
   ctx->read_ctx->store_pass = value;
 }
 
-static void sqlcipher_codec_get_pass(codec_ctx *ctx, void **zKey, int *nKey) {
+void sqlcipher_codec_get_pass(codec_ctx *ctx, void **zKey, int *nKey) {
   *zKey = ctx->read_ctx->pass;
   *nKey = ctx->read_ctx->pass_sz;
 }
@@ -487,8 +491,11 @@ int sqlcipher_codec_ctx_set_cipher(codec_ctx *ctx, const char *cipher_name, int 
   cipher_ctx *c_ctx = for_ctx ? ctx->write_ctx : ctx->read_ctx;
   int rc;
 
-  c_ctx->provider->set_cipher(c_ctx->provider_ctx, cipher_name);
-
+  rc = c_ctx->provider->set_cipher(c_ctx->provider_ctx, cipher_name);
+  if(rc != SQLITE_OK){
+    sqlcipher_codec_ctx_set_error(ctx, rc);
+    return rc;
+  }
   c_ctx->key_sz = c_ctx->provider->get_key_sz(c_ctx->provider_ctx);
   c_ctx->iv_sz = c_ctx->provider->get_iv_sz(c_ctx->provider_ctx);
   c_ctx->block_sz = c_ctx->provider->get_block_sz(c_ctx->provider_ctx);
@@ -661,6 +668,14 @@ int sqlcipher_codec_ctx_get_pagesize(codec_ctx *ctx) {
   return ctx->page_sz;
 }
 
+void sqlcipher_set_default_pagesize(int page_size) {
+  default_page_size = page_size;
+}
+
+int sqlcipher_get_default_pagesize() {
+  return default_page_size;
+}
+
 int sqlcipher_codec_ctx_init(codec_ctx **iCtx, Db *pDb, Pager *pPager, sqlite3_file *fd, const void *zKey, int nKey) {
   int rc;
   codec_ctx *ctx;
@@ -691,7 +706,7 @@ int sqlcipher_codec_ctx_init(codec_ctx **iCtx, Db *pDb, Pager *pPager, sqlite3_f
      in encrypted and thus sqlite can't effectively determine the pagesize. this causes an issue in 
      cases where bytes 16 & 17 of the page header are a power of 2 as reported by John Lehman
   */
-  if((rc = sqlcipher_codec_ctx_set_pagesize(ctx, SQLITE_DEFAULT_PAGE_SIZE)) != SQLITE_OK) return rc;
+  if((rc = sqlcipher_codec_ctx_set_pagesize(ctx, default_page_size)) != SQLITE_OK) return rc;
 
   if((rc = sqlcipher_cipher_ctx_init(&ctx->read_ctx)) != SQLITE_OK) return rc; 
   if((rc = sqlcipher_cipher_ctx_init(&ctx->write_ctx)) != SQLITE_OK) return rc; 
@@ -876,12 +891,12 @@ static int sqlcipher_cipher_ctx_key_derive(codec_ctx *ctx, cipher_ctx *c_ctx) {
       if(ctx->read_ctx->provider->random(ctx->read_ctx->provider_ctx, ctx->kdf_salt, FILE_HEADER_SZ) != SQLITE_OK) return SQLITE_ERROR;
       ctx->need_kdf_salt = 0;
     }
-    if (c_ctx->pass_sz == ((c_ctx->key_sz * 2) + 3) && sqlite3StrNICmp((const char *)c_ctx->pass ,"x'", 2) == 0) { 
+    if (c_ctx->pass_sz == ((c_ctx->key_sz * 2) + 3) && sqlite3StrNICmp((const char *)c_ctx->pass ,"x'", 2) == 0 && cipher_isHex(c_ctx->pass + 2, c_ctx->key_sz * 2)) { 
       int n = c_ctx->pass_sz - 3; /* adjust for leading x' and tailing ' */
       const unsigned char *z = c_ctx->pass + 2; /* adjust lead offset of x' */
       CODEC_TRACE(("cipher_ctx_key_derive: using raw key from hex\n")); 
       cipher_hex2bin(z, n, c_ctx->key);
-    } else if (c_ctx->pass_sz == (((c_ctx->key_sz + ctx->kdf_salt_sz) * 2) + 3) && sqlite3StrNICmp((const char *)c_ctx->pass ,"x'", 2) == 0) { 
+    } else if (c_ctx->pass_sz == (((c_ctx->key_sz + ctx->kdf_salt_sz) * 2) + 3) && sqlite3StrNICmp((const char *)c_ctx->pass ,"x'", 2) == 0 && cipher_isHex(c_ctx->pass + 2, (c_ctx->key_sz + ctx->kdf_salt_sz) * 2)) { 
       const unsigned char *z = c_ctx->pass + 2; /* adjust lead offset of x' */
       CODEC_TRACE(("cipher_ctx_key_derive: using raw key from hex\n")); 
       cipher_hex2bin(z, (c_ctx->key_sz * 2), c_ctx->key);
@@ -1010,7 +1025,7 @@ int sqlcipher_codec_ctx_migrate(codec_ctx *ctx) {
   int saved_flags;
   int saved_nChange;
   int saved_nTotalChange;
-  void (*saved_xTrace)(void*,const char*);
+  int (*saved_xTrace)(u32,void*,void*,void*); /* Saved db->xTrace */
   Db *pDb = 0;
   sqlite3 *db = ctx->pBt->db;
   const char *db_filename = sqlite3_db_filename(db, "main");
@@ -1149,11 +1164,9 @@ int sqlcipher_codec_ctx_migrate(codec_ctx *ctx) {
       db->nTotalChange = saved_nTotalChange;
       db->xTrace = saved_xTrace;
       db->autoCommit = 1;
-      if( pDb ){
-        sqlite3BtreeClose(pDb->pBt);
-        pDb->pBt = 0;
-        pDb->pSchema = 0;
-      }
+      sqlite3BtreeClose(pDb->pBt);
+      pDb->pBt = 0;
+      pDb->pSchema = 0;
       sqlite3ResetAllSchemasOfConnection(db);
       remove(migrated_db_filename);
       sqlite3_free(migrated_db_filename);
@@ -1196,17 +1209,22 @@ int sqlcipher_codec_add_random(codec_ctx *ctx, const char *zRight, int random_sz
 
 int sqlcipher_cipher_profile(sqlite3 *db, const char *destination){
   FILE *f;
-  if( strcmp(destination,"stdout")==0 ){
+  if(sqlite3StrICmp(destination, "stdout") == 0){
     f = stdout;
-  }else if( strcmp(destination, "stderr")==0 ){
+  }else if(sqlite3StrICmp(destination, "stderr") == 0){
     f = stderr;
-  }else if( strcmp(destination, "off")==0 ){
+  }else if(sqlite3StrICmp(destination, "off") == 0){
     f = 0;
   }else{
-    f = fopen(destination, "wb");
-    if( f==0 ){
-      return SQLITE_ERROR;
-    }
+#if defined(_WIN32) && (__STDC_VERSION__ > 199901L) || defined(SQLITE_OS_WINRT)
+    if(fopen_s(&f, destination, "a") != 0){
+#else
+    f = fopen(destination, "a");
+    if(f == 0){
+#endif    
+    return SQLITE_ERROR;
+  }	
+
   }
   sqlite3_profile(db, sqlcipher_profile_callback, f);
   return SQLITE_OK;
@@ -1215,9 +1233,16 @@ int sqlcipher_cipher_profile(sqlite3 *db, const char *destination){
 static void sqlcipher_profile_callback(void *file, const char *sql, sqlite3_uint64 run_time){
   FILE *f = (FILE*)file;
   double elapsed = run_time/1000000.0;
-  if( f ) fprintf(f, "Elapsed time:%.3f ms - %s\n", elapsed, sql);
+  if(f) fprintf(f, "Elapsed time:%.3f ms - %s\n", elapsed, sql);
 }
 
+int sqlcipher_codec_fips_status(codec_ctx *ctx) {
+  return ctx->read_ctx->provider->fips_status(ctx->read_ctx);
+}
+
+const char* sqlcipher_codec_get_provider_version(codec_ctx *ctx) {
+  return ctx->read_ctx->provider->get_provider_version(ctx->read_ctx);
+}
 
 #endif
 /* END SQLCIPHER */

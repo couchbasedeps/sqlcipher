@@ -241,6 +241,9 @@ execsql {ROLLBACK}
 
 # Test the built-in busy timeout handler
 #
+# EVIDENCE-OF: R-23579-05241 PRAGMA busy_timeout; PRAGMA busy_timeout =
+# milliseconds; Query or change the setting of the busy timeout.
+#
 do_test lock-2.8 {
   db2 timeout 400
   execsql BEGIN
@@ -420,8 +423,9 @@ do_test lock-6.5 {
 #   * there exists one or more active read-only statements, and
 #   * a transaction that modified zero database pages is committed.
 # 
-set temp_status unlocked
-if {$TEMP_STORE>=2} {set temp_status unknown}
+#set temp_status unlocked
+#if {$TEMP_STORE>=2} {set temp_status unknown}
+set temp_status unknown
 do_test lock-7.1 {
   set STMT [sqlite3_prepare $DB "SELECT * FROM sqlite_master" -1 TAIL]
   sqlite3_step $STMT

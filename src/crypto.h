@@ -37,14 +37,19 @@
 
 #if !defined (SQLCIPHER_CRYPTO_CC) \
    && !defined (SQLCIPHER_CRYPTO_LIBTOMCRYPT) \
-   && !defined (SQLCIPHER_CRYPTO_OPENSSL)
+   && !defined (SQLCIPHER_CRYPTO_OPENSSL) \
+   && !defined (SQLCIPHER_CRYPTO_MBEDTLS)
 #define SQLCIPHER_CRYPTO_OPENSSL
 #endif
 
 #define FILE_HEADER_SZ 16
 
 #ifndef CIPHER_VERSION
-#define CIPHER_VERSION "3.2.0"
+#ifdef SQLCIPHER_FIPS
+#define CIPHER_VERSION "3.4.1 FIPS"
+#else
+#define CIPHER_VERSION "3.4.1"
+#endif
 #endif
 
 #ifndef CIPHER
@@ -156,6 +161,19 @@ static void cipher_bin2hex(const unsigned char* in, int sz, char *out) {
     } 
 }
 
+static int cipher_isHex(const unsigned char *hex, int sz){
+  int i;
+  for(i = 0; i < sz; i++) {
+    unsigned char c = hex[i];
+    if ((c < '0' || c > '9') &&
+        (c < 'A' || c > 'F') &&
+        (c < 'a' || c > 'f')) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 /* extensions defined in crypto_impl.c */
 typedef struct codec_ctx codec_ctx;
 
@@ -179,6 +197,9 @@ void sqlcipher_codec_get_keyspec(codec_ctx *, void **zKey, int *nKey);
 int sqlcipher_codec_ctx_set_pagesize(codec_ctx *, int);
 int sqlcipher_codec_ctx_get_pagesize(codec_ctx *);
 int sqlcipher_codec_ctx_get_reservesize(codec_ctx *);
+
+void sqlcipher_set_default_pagesize(int page_size);
+int sqlcipher_get_default_pagesize();
 
 void sqlcipher_set_default_kdf_iter(int iter);
 int sqlcipher_get_default_kdf_iter();
@@ -219,7 +240,8 @@ static void sqlcipher_profile_callback(void *file, const char *sql, sqlite3_uint
 static int sqlcipher_codec_get_store_pass(codec_ctx *ctx);
 static void sqlcipher_codec_get_pass(codec_ctx *ctx, void **zKey, int *nKey);
 static void sqlcipher_codec_set_store_pass(codec_ctx *ctx, int value);
-
+int sqlcipher_codec_fips_status(codec_ctx *ctx);
+const char* sqlcipher_codec_get_provider_version(codec_ctx *ctx);
 #endif
 #endif
 /* END SQLCIPHER */
